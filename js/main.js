@@ -3,14 +3,15 @@
 const constraints = {
     audio: false,
     video: {
-        width: 1280,
-        height: 720,
-        frameRate: 15
+        width: 640,
+        height: 480,
+        frameRate: 15,
+        // facingMode: 'back',
     }
 };
 
 function handleSuccess(stream) {
-    const video = document.querySelector('#localVideo');
+    const video = document.querySelector('video#localVideo');
     const videoTracks = stream.getVideoTracks();
     console.log('Got stream with constraints:', constraints);
     console.log(`Using video device: ${videoTracks[0].label}`);
@@ -38,4 +39,23 @@ async function init(evt) {
     }
 }
 
-document.querySelector('#showVideo').addEventListener('click', (evt) => { init(evt); });
+let socket;
+
+document.querySelector('button#startButton').addEventListener('click', (evt) => {
+    if (!socket) {
+        socket = io.connect();
+        init(evt);
+    }
+});
+
+document.querySelector('button#callButton').addEventListener('click', () => {
+    if (socket) {
+        socket.emit('join', '123');
+    }
+});
+
+document.querySelector('button#hangupButton').addEventListener('click', () => {
+    if (socket) {
+        socket.emit('leave', '123');
+    }
+});

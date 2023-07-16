@@ -43,8 +43,8 @@ let socket;
 
 document.querySelector('button#startButton').addEventListener('click', (evt) => {
     if (!socket) {
-        socket = io.connect();
         init(evt);
+        socket = io.connect();
     }
 });
 

@@ -47,15 +47,15 @@ const localVideo = document.getElementById('localVideo');
 const remoteVideo = document.getElementById('remoteVideo');
 
 localVideo.addEventListener('loadedmetadata', function() {
-  console.log(`Local video size: ${this.videoWidth}*${this.videoHeight}`);
+  console.log(`localVideo >>> size: ${this.videoWidth}*${this.videoHeight}`);
 });
 
 remoteVideo.addEventListener('loadedmetadata', function() {
-  console.log(`Remote video size: ${this.videoWidth}*${this.videoHeight}`);
+  console.log(`remoteVideo >>> size: ${this.videoWidth}*${this.videoHeight}`);
 });
 
-remoteVideo.addEventListener('resize', () => {
-  console.log(`Remote video size changed to ${remoteVideo.videoWidth}*${remoteVideo.videoHeight}`);
+remoteVideo.addEventListener('resize', function() {
+  console.log(`remoteVideo >>> size changed to ${this.videoWidth}*${this.videoHeight}`);
 });
 
 // event callbacks
@@ -64,27 +64,27 @@ let localStream;
 let pc;
 
 async function start() {
-  console.log('user clicked on start');
+  console.log('startButton >>> user clicked on start');
   startButton.disabled = true;
   try {
     // prepare local stream
     if (!localStream) {
-      console.log(`Requesting local stream, constraints=${JSON.stringify(mediaConstraints)}`);
+      console.log(`startButton >>> Requesting local stream, constraints=${JSON.stringify(mediaConstraints)}`);
       localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      console.log('Received local stream');
+      console.log('startButton >>> Received local stream');
       localVideo.srcObject = localStream;
     }
     // connect to the socket.io server
-    console.log('Connecting to socket.io server...');
+    console.log('startButton >>> Connecting to socket.io server...');
     socket = io.connect();
-    console.log('Connected to socket.io server');
-    socket.on('join_notify', onJoinNotify);
-    socket.on('leave_notify', onLeaveNotify);
-    socket.on('message', onMessage);
+    console.log('startButton >>> Connected to socket.io server');
+    socket.addEventListener('join_notify', onJoinNotify);
+    socket.addEventListener('leave_notify', onLeaveNotify);
+    socket.addEventListener('message', onMessage);
     // toggle button state
     joinButton.disabled = false;
   } catch (err) {
-    console.error(`start() error: ${err}`);
+    console.error(`startButton >>> start() error: ${err}`);
     // reset buttons
     startButton.disabled = false;
     joinButton.disabled = true;
@@ -92,31 +92,40 @@ async function start() {
 }
 
 async function join() {
-  console.log('user clicked on join');
+  console.log('joinButton >>> user clicked on join');
   joinButton.disabled = true;
   try {
     // create PeerConnection
     if (!pc) {
-      console.log(`Creating PeerConnection, configuration=${JSON.stringify(pcConfig)}`);
+      console.log(`joinButton >>> Creating PeerConnection, configuration=${JSON.stringify(pcConfig)}`);
       pc = new RTCPeerConnection(pcConfig);
-      pc.onicecandidate = onIceCandidate;
-      pc.oniceconnectionstatechange = onIceStateChange;
-      pc.ontrack = gotRemoteStream;
+      pc.addEventListener('connectionstatechange', onPcConnectionState);
+      pc.addEventListener('icecandidate', onIceCandidate);
+      pc.onicecandidateerror = (evt) => {
+        console.log(`pc >>> ICE candidate error: The server ${evt.url} returned an error with code ${evt.errorCode}: ${evt.errorText}`);
+      };
+      pc.oniceconnectionstatechange = () => {
+        console.log(`pc >>> ICE connection state changed: ${pc.iceConnectionState}`);
+      };
+      pc.onicegatheringstatechange = () => {
+        console.log(`pc >>> ICE gathering state changed: ${pc.iceGatheringState}`);
+      };
+      pc.addEventListener('track', gotRemoteStream);
       // Add local tracks
       localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-      console.log('Added local stream to pc');
+      console.log('joinButton >>> Added local stream to pc');
     }
     // send join request
-    console.log(`Joining room ${roomId}...`);
+    console.log(`joinButton >>> Joining room ${roomId}...`);
     const res = await socket.emitWithAck('join', { room: roomId });
     if (!res || res.code !== 200) {
       throw new Error(`Bad response for join: ${JSON.stringify(res)}`);
     }
-    console.log(`joined room ${roomId}, response=${JSON.stringify(res)}`);
+    console.log(`joinButton >>> joined room ${roomId}, response=${JSON.stringify(res)}`);
     // toggle button state
     leaveButton.disabled = false;
   } catch (err) {
-    console.error(`join() error: ${err}`);
+    console.error(`joinButton >>> join() error: ${err}`);
     // reset buttons
     joinButton.disabled = false;
     leaveButton.disabled = true;
@@ -124,50 +133,50 @@ async function join() {
 }
 
 async function leave() {
-  console.log('user clicked on leave');
-  await doLeave();
+  console.log('leaveButton >>> user clicked on leave');
+  await doLeave('leaveButton');
 }
 
 async function onJoinNotify(msg) {
-  console.log(`Received join notify from server: ${JSON.stringify(msg)}`);
+  console.log(`socket >>> Received join notify from server: ${JSON.stringify(msg)}`);
   // state check
   if (!joinButton.disabled) {
-    console.log('we are not in join state, ignore join_notify');
+    console.log('socket >>> we are not in join state, ignore join_notify');
     return;
   }
   // initiate WebRTC call
   try {
     // create offer
-    console.log(`caller: create offer, options=${JSON.stringify(offerOptions)}`);
+    console.log(`socket >>> caller: create offer, options=${JSON.stringify(offerOptions)}`);
     const offer = await pc.createOffer(offerOptions);
-    console.log(`caller: offer created: ${JSON.stringify(offer)}`);
+    console.log(`socket >>> caller: offer created: ${JSON.stringify(offer)}`);
     // set local SDP
-    console.log('caller: set local SDP');
+    console.log('socket >>> caller: set local SDP');
     await pc.setLocalDescription(offer);
     // send offer
-    console.log('caller: sending offer to peer...');
+    console.log('socket >>> caller: sending offer to peer...');
     socket.emit('message', { room: roomId, data: offer });
   } catch (err) {
-    console.error(`Fail to initiate WebRTC call: ${err}`);
+    console.error(`socket >>> Fail to initiate WebRTC call: ${err}`);
   }
 }
 
 async function onLeaveNotify(msg) {
-  console.log(`Received leave notify from server: ${JSON.stringify(msg)}`);
+  console.log(`socket >>> Received leave notify from server: ${JSON.stringify(msg)}`);
   // state check
   if (!joinButton.disabled) {
-    console.log('we are not in join state, ignore leave_notify');
+    console.log('socket >>> we are not in join state, ignore leave_notify');
     return;
   }
   // do leave
-  await doLeave();
+  await doLeave('socket');
 }
 
 async function onMessage(msg) {
-  console.log(`Received message from server: ${JSON.stringify(msg)}`);
+  console.log(`socket >>> Received message from server: ${JSON.stringify(msg)}`);
   // state check
   if (!joinButton.disabled) {
-    console.log('we are not in join state, ignore message');
+    console.log('socket >>> we are not in join state, ignore message');
     return;
   }
   // process message
@@ -176,37 +185,33 @@ async function onMessage(msg) {
     if (!msg || !msg.room || !msg.data) {
       throw new Error('invalid message');
     }
-    let data = msg.data;
+    const data = msg.data;
     if (data.type === 'offer') {
       // callee
-      console.log('callee: received offer from peer, set remote SDP');
+      console.log('socket >>> callee: received offer from peer, set remote SDP');
       await pc.setRemoteDescription(new RTCSessionDescription(data));
-      console.log('callee: create answer, options={}');
+      console.log('socket >>> callee: create answer, options={}');
       const answer = await pc.createAnswer();
-      console.log(`callee: answer created: ${JSON.stringify(answer)}`);
-      console.log('callee: set local SDP');
+      console.log(`socket >>> callee: answer created: ${JSON.stringify(answer)}`);
+      console.log('socket >>> callee: set local SDP');
       await pc.setLocalDescription(answer);
-      console.log('callee: sending answer to peer...');
+      console.log('socket >>> callee: sending answer to peer...');
       socket.emit('message', { room: roomId, data: answer });
     } else if (data.type === 'answer') {
       // caller
-      console.log('caller: received answer from peer, set remote SDP');
+      console.log('socket >>> caller: received answer from peer, set remote SDP');
       await pc.setRemoteDescription(new RTCSessionDescription(data));
     } else if (data.type === 'candidate') {
       // both
-      console.log('both: received ICE candidate from peer, add ICE candidate');
-      let candidate = new RTCIceCandidate({
-        sdpMLineIndex: data.index,
-        candidate: data.candidate
-      });
-      await pc.addIceCandidate(candidate);
+      console.log('socket >>> both: received ICE candidate from peer, add ICE candidate');
+      await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
     }
   } catch (err) {
-    console.error(`Fail to process message: ${err}`);
+    console.error(`socket >>> Fail to process message: ${err}`);
   }
 }
 
-async function doLeave() {
+async function doLeave(pattern) {
   leaveButton.disabled = true;
   try {
     // stop remote video
@@ -216,36 +221,44 @@ async function doLeave() {
     pc = null;
     // send leave request
     const res = await socket.emitWithAck('leave', { room: roomId });
-    console.log(`left room ${roomId}, response=${JSON.stringify(res)}`);
+    console.log(`${pattern} >>> left room ${roomId}, response=${JSON.stringify(res)}`);
   } catch (err) {
-    console.error(`doLeave() error: ${err}`);
+    console.error(`${pattern} >>> doLeave() error: ${err}`);
   }
   joinButton.disabled = false;
 }
 
-async function onIceCandidate(evt) {
-  console.log(`PeerConnection: ICE candidate: ${JSON.stringify(evt.candidate)}`);
-  if (evt.candidate) {
-    console.log('PeerConnection: sending ICE candidate to peer...');
+function onPcConnectionState() {
+  console.log(`pc >>> Conneciton state changed: ${pc.connectionState}`);
+  if (pc.connectionState === 'connected') {
+    const senders = pc.getSenders();
+    senders.forEach((sender) => {
+      const track = sender.track;
+      const selectedCandidate = sender.transport.iceTransport.getSelectedCandidatePair();
+      console.log(`pc >>> Track: ${track.label}`);
+      console.log(`pc >>> - local ICE selected: ${selectedCandidate.local.candidate}`);
+      console.log(`pc >>> - remote ICE selected: ${selectedCandidate.remote.candidate}`);
+    });
+  }
+};
+
+function onIceCandidate(evt) {
+  console.log(`pc >>> ICE candidate: ${JSON.stringify(evt.candidate)}`);
+  if (evt.candidate !== null) {
+    console.log('pc >>> sending ICE candidate to peer...');
     socket.emit('message', {
       room: roomId,
       data: {
         type: 'candidate',
-        index: evt.candidate.sdpMLineIndex,
-        candidate: evt.candidate.candidate
+        candidate: evt.candidate
       }
     });
   }
 }
 
-function onIceStateChange(evt) {
-  console.log(`PeerConnection: ICE state: ${pc.iceConnectionState}`);
-  console.log(`PeerConnection: ICE state change event: ${JSON.stringify(evt)}`);
-}
-
 function gotRemoteStream(evt) {
   if (remoteVideo.srcObject !== evt.streams[0]) {
-    console.log('PeerConnection: received remote stream');
+    console.log('pc >>> received remote stream');
     remoteVideo.srcObject = evt.streams[0];
   }
 }

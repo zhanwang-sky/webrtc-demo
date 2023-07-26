@@ -2,6 +2,7 @@
 
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
+const passive = urlParams.get('passive');
 
 // getUserMedia
 const mediaConstraints = {
@@ -68,7 +69,7 @@ async function start() {
   startButton.disabled = true;
   try {
     // prepare local stream
-    if (!localStream) {
+    if (!localStream && passive !== 'true') {
       console.log(`startButton >>> Requesting local stream, constraints=${JSON.stringify(mediaConstraints)}`);
       localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
       console.log('startButton >>> Received local stream');
@@ -112,8 +113,10 @@ async function join() {
       };
       pc.addEventListener('track', gotRemoteStream);
       // Add local tracks
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-      console.log('joinButton >>> Added local stream to pc');
+      if (passive !== 'true') {
+        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+        console.log('joinButton >>> Added local stream to pc');
+      }
     }
     // send join request
     console.log(`joinButton >>> Joining room ${roomId}...`);
@@ -157,7 +160,7 @@ async function onJoinNotify(msg) {
     console.log('socket >>> caller: sending offer to peer...');
     socket.emit('message', { room: roomId, data: offer });
   } catch (err) {
-    console.error(`socket >>> Fail to initiate WebRTC call: ${err}`);
+    console.error(`socket >>> onJoinNotify() error: ${err}`);
   }
 }
 
@@ -207,7 +210,7 @@ async function onMessage(msg) {
       await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
     }
   } catch (err) {
-    console.error(`socket >>> Fail to process message: ${err}`);
+    console.error(`socket >>> onMessage() error: ${err}`);
   }
 }
 

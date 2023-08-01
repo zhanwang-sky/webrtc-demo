@@ -16,12 +16,16 @@ const mediaConstraints = {
 };
 
 // RTCPeerConnection
-const turnServer = `turn:${window.location.hostname}:3478`;
 const turnUser = urlParams.has('turnu') ? urlParams.get('turnu') : '';
 const turnPass = urlParams.has('turnp') ? urlParams.get('turnp') : '';
-const pcConfig = {
-  iceServers: [ { urls: [ turnServer ], username: turnUser, credential: turnPass } ],
-  iceTransportPolicy: 'all'
+let pcConfig = {};
+
+if (turnUser && turnPass) {
+  const turnUrls = [`turn:${window.location.hostname}:3478`];
+  pcConfig = {
+    iceServers: [ { urls: turnUrls, username: turnUser, credential: turnPass } ],
+    iceTransportPolicy: 'all'
+  };
 };
 
 // Offer
@@ -62,6 +66,7 @@ remoteVideo.addEventListener('resize', function() {
 // event callbacks
 let socket;
 let localStream;
+let remoteStream;
 let pc;
 
 async function start() {
@@ -100,8 +105,6 @@ async function join() {
     if (!pc) {
       console.log(`joinButton >>> Creating PeerConnection, configuration=${JSON.stringify(pcConfig)}`);
       pc = new RTCPeerConnection(pcConfig);
-      pc.addEventListener('connectionstatechange', onPcConnectionState);
-      pc.addEventListener('icecandidate', onIceCandidate);
       pc.onicecandidateerror = (evt) => {
         console.log(`pc >>> ICE candidate error: The server ${evt.url} returned an error with code ${evt.errorCode}: ${evt.errorText}`);
       };
@@ -111,11 +114,18 @@ async function join() {
       pc.onicegatheringstatechange = () => {
         console.log(`pc >>> ICE gathering state changed: ${pc.iceGatheringState}`);
       };
-      pc.addEventListener('track', gotRemoteStream);
+      pc.onsignalingstatechange = () => {
+        console.log(`pc >>> Signaling state changed: ${pc.signalingState}`);
+      };
+      pc.addEventListener('connectionstatechange', onConnectionStateChange);
+      pc.addEventListener('icecandidate', onIceCandidate);
+      pc.addEventListener('track', onTrack);
       // Add local tracks
       if (passive !== 'true') {
-        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-        console.log('joinButton >>> Added local stream to pc');
+        localStream.getTracks().forEach((track) => {
+          pc.addTrack(track, localStream);
+          console.log(`joinButton >>> Added local track to pc: '${track.label}' {${track.id}}`);
+        });
       }
     }
     // send join request
@@ -231,19 +241,30 @@ async function doLeave(pattern) {
   joinButton.disabled = false;
 }
 
-function onPcConnectionState() {
+function onConnectionStateChange() {
   console.log(`pc >>> Conneciton state changed: ${pc.connectionState}`);
   if (pc.connectionState === 'connected') {
-    const senders = pc.getSenders();
-    senders.forEach((sender) => {
-      const track = sender.track;
-      const selectedCandidate = sender.transport.iceTransport.getSelectedCandidatePair();
-      console.log(`pc >>> Track: ${track.label}`);
-      console.log(`pc >>> - local ICE selected: ${selectedCandidate.local.candidate}`);
-      console.log(`pc >>> - remote ICE selected: ${selectedCandidate.remote.candidate}`);
+    const transceivers = pc.getTransceivers();
+    const iceDumper = function(xfer) {
+      const track = xfer.track;
+      const iceTransport = xfer.transport.iceTransport;
+      const pair = iceTransport.getSelectedCandidatePair();
+      const localType = `${pair.local.type}`;
+      const localCandidate = `${pair.local.address}:${pair.local.port}`;
+      const remoteType = `${pair.remote.type}`;
+      const remoteCandidate = `${pair.remote.address}:${pair.remote.port}`;
+      console.log(`pc >>> ICE pair for track '${track.label}' {${track.id}}: <${localType}>${localCandidate} <=> <${remoteType}>${remoteCandidate}`);
+    };
+    transceivers.forEach((x) => {
+      if (x.sender) {
+        iceDumper(x.sender);
+      }
+      if (x.receiver) {
+        iceDumper(x.receiver);
+      }
     });
   }
-};
+}
 
 function onIceCandidate(evt) {
   console.log(`pc >>> ICE candidate: ${JSON.stringify(evt.candidate)}`);
@@ -259,10 +280,11 @@ function onIceCandidate(evt) {
   }
 }
 
-function gotRemoteStream(evt) {
-  if (remoteVideo.srcObject !== evt.streams[0]) {
-    console.log('pc >>> received remote stream');
-    remoteVideo.srcObject = evt.streams[0];
+function onTrack(evt) {
+  console.log(`pc >>> Got remote track '${evt.track.label}' {${evt.track.id}}`);
+  if (remoteStream !== evt.streams[0]) {
+    remoteStream = evt.streams[0];
+    remoteVideo.srcObject = remoteStream;
   }
 }
 

@@ -1,0 +1,26 @@
+body {
+  font-family: 'Roboto', sans-serif;
+  font-weight: 300;
+  margin: 0;
+  padding: 1em;
+  word-break: break-word;
+}
+
+div#container {
+  margin: 0 auto 0 auto;
+  max-width: 60em;
+  padding: 1em 1.5em 1.3em 1.5em;
+}
+
+video {
+  background: #222;
+  --width: 45%;
+  width: var(--width);
+  height: calc(var(--width) * 0.75);
+  margin: 0 0 20px 0;
+  vertical-align: top;
+}
+
+video#localVideo {
+  margin: 0 20px 20px 0;
+}

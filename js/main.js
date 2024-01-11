@@ -1,40 +1,12 @@
 'use strict';
 
-const urlParams = new URLSearchParams(window.location.search);
-const roomId = urlParams.get('room');
-const passive = urlParams.get('passive');
+// Janus
+let janus = null;
+let echotest = null;
+const echotestPluginBackend = "janus.plugin.echotest";
+const echotestOpaqueId = "echotest-" + Janus.randomString(12);
 
-// getUserMedia
-const mediaConstraints = {
-  audio: false,
-  video: {
-    width: 640,
-    height: 480,
-    frameRate: 15,
-    // facingMode: 'back',
-  }
-};
-
-// RTCPeerConnection
-const turnUser = urlParams.has('turnu') ? urlParams.get('turnu') : '';
-const turnPass = urlParams.has('turnp') ? urlParams.get('turnp') : '';
-let pcConfig = {};
-
-if (turnUser && turnPass) {
-  const turnUrls = [`turn:${window.location.hostname}:3478`];
-  pcConfig = {
-    iceServers: [ { urls: turnUrls, username: turnUser, credential: turnPass } ],
-    iceTransportPolicy: 'all'
-  };
-};
-
-// Offer
-const offerOptions = {
-  offerToReceiveAudio: 0,
-  offerToReceiveVideo: 1
-};
-
-// buttons
+// Buttons
 const startButton = document.getElementById('startButton');
 const joinButton = document.getElementById('joinButton');
 const leaveButton = document.getElementById('leaveButton');
@@ -47,249 +19,157 @@ startButton.addEventListener('click', start);
 joinButton.addEventListener('click', join);
 leaveButton.addEventListener('click', leave);
 
-// videos
+// Media
 const localVideo = document.getElementById('localVideo');
 const remoteVideo = document.getElementById('remoteVideo');
+let localStream = null;
+let remoteStream = null;
 
-localVideo.addEventListener('loadedmetadata', function() {
-  console.log(`localVideo >>> size: ${this.videoWidth}*${this.videoHeight}`);
-});
+const mediaConstraints = {
+  audio: true,
+  video: {
+    width: 320,
+    height: 240,
+    frameRate: 15,
+  }
+};
 
-remoteVideo.addEventListener('loadedmetadata', function() {
-  console.log(`remoteVideo >>> size: ${this.videoWidth}*${this.videoHeight}`);
-});
-
-remoteVideo.addEventListener('resize', function() {
-  console.log(`remoteVideo >>> size changed to ${this.videoWidth}*${this.videoHeight}`);
-});
-
-// event callbacks
-let socket;
-let localStream;
-let remoteStream;
-let pc;
-
+// Callbacks
 async function start() {
-  console.log('startButton >>> user clicked on start');
+  Janus.log("startButton >>> User clicked on start");
+
   startButton.disabled = true;
+
   try {
-    // prepare local stream
-    if (!localStream && passive !== 'true') {
-      console.log(`startButton >>> Requesting local stream, constraints=${JSON.stringify(mediaConstraints)}`);
+    if (!localStream) {
       localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      console.log('startButton >>> Received local stream');
       localVideo.srcObject = localStream;
     }
-    // connect to the socket.io server
-    console.log('startButton >>> Connecting to socket.io server...');
-    socket = io.connect();
-    console.log('startButton >>> Connected to socket.io server');
-    socket.addEventListener('join_notify', onJoinNotify);
-    socket.addEventListener('leave_notify', onLeaveNotify);
-    socket.addEventListener('message', onMessage);
-    // toggle button state
-    joinButton.disabled = false;
   } catch (err) {
-    console.error(`startButton >>> start() error: ${err}`);
-    // reset buttons
-    startButton.disabled = false;
-    joinButton.disabled = true;
+    Janus.error("startButton >>> Fail to get user media:", err);
+    alert("Fail to get user media.");
+    window.location.reload();
+    return;
   }
+
+  janus = new Janus(
+    {
+      server: server,
+      iceServers: iceServers,
+      success: function() {
+        Janus.log(`janus >>> Session created, id=${janus.getSessionId()}`);
+        joinButton.disabled = false;
+      },
+      error: function(err) {
+        Janus.error("janus >>> Session error:", err);
+        // reset buttons
+        leaveButton.disabled = true;
+        joinButton.disabled = true;
+        startButton.disabled = false;
+      },
+      destroyed: function() {
+        Janus.log("janus >>> Session destroyed");
+      }
+    }
+  );
 }
 
 async function join() {
-  console.log('joinButton >>> user clicked on join');
+  Janus.log("joinButton >>> User clicked on join");
+
   joinButton.disabled = true;
-  try {
-    // create PeerConnection
-    if (!pc) {
-      console.log(`joinButton >>> Creating PeerConnection, configuration=${JSON.stringify(pcConfig)}`);
-      pc = new RTCPeerConnection(pcConfig);
-      pc.onicecandidateerror = (evt) => {
-        console.log(`pc >>> ICE candidate error: The server ${evt.url} returned an error with code ${evt.errorCode}: ${evt.errorText}`);
-      };
-      pc.oniceconnectionstatechange = () => {
-        console.log(`pc >>> ICE connection state changed: ${pc.iceConnectionState}`);
-      };
-      pc.onicegatheringstatechange = () => {
-        console.log(`pc >>> ICE gathering state changed: ${pc.iceGatheringState}`);
-      };
-      pc.onsignalingstatechange = () => {
-        console.log(`pc >>> Signaling state changed: ${pc.signalingState}`);
-      };
-      pc.addEventListener('connectionstatechange', onConnectionStateChange);
-      pc.addEventListener('icecandidate', onIceCandidate);
-      pc.addEventListener('track', onTrack);
-      // Add local tracks
-      if (passive !== 'true') {
-        localStream.getTracks().forEach((track) => {
-          pc.addTrack(track, localStream);
-          console.log(`joinButton >>> Added local track to pc: '${track.label}' {${track.id}}`);
-        });
+
+  janus.attach(
+    {
+      plugin: echotestPluginBackend,
+      opaqueId: echotestOpaqueId,
+      success: function(pluginHandle) {
+        Janus.log(`janus >>> Plugin attached, id=${pluginHandle.getId()}`);
+        remoteStream = new MediaStream();
+        remoteVideo.srcObject = remoteStream;
+        echotest = pluginHandle;
+        echotest.createOffer(
+          {
+            tracks: [
+              { type: 'audio', capture: localStream.getAudioTracks()[0], recv: true, dontStop: true },
+              { type: 'video', capture: localStream.getVideoTracks()[0], recv: true, dontStop: true },
+            ],
+            trickle: true,
+            success: function(jsep) {
+              Janus.log("echotest >>> Got local SDP:", jsep);
+              let body = { audio: true, audiocodec: 'opus', video: true, videocodec: 'h264' };
+              echotest.send({ message: body, jsep: jsep });
+              leaveButton.disabled = false;
+            },
+            error: function(err) {
+              Janus.error("echotest >>> Error creating offer:", err);
+              echotest.detach();
+              joinButton.disabled = false;
+            }
+          }
+        );
+      },
+      error: function(err) {
+        Janus.error("janus >>> Plugin error:", err);
+        // reset buttons
+        leaveButton.disabled = true;
+        joinButton.disabled = false;
+      },
+      webrtcState: function(updown, reason) {
+        Janus.log(`janus >>> PeerConnection ${(updown ? "up" : "down")}${reason ? " (" + reason + ")" : ""}`);
+      },
+      iceState: function(state) {
+        Janus.log(`janus >>> ICE state changed to ${state}`);
+      },
+      mediaState: function(type, receiving, mid) {
+        Janus.log(`janus >>> Janus ${receiving ? "started" : "stopped"} receiving ${type}, mid=${mid}`);
+      },
+      slowLink: function(uplink, lost, mid) {
+        Janus.warn(`janus >>> Janus reports problems ${(uplink ? "sending" : "receiving")} packets on mid ${mid} (${lost} pkt lost)`);
+      },
+      onmessage: function(msg, jsep) {
+        Janus.log("janus >>> Got a message:", msg);
+        if (jsep) {
+          Janus.log("janus >>> Handling remote SDP:", jsep);
+          echotest.handleRemoteJsep({ jsep: jsep });
+        }
+      },
+      onremotetrack: function(track, mid, added, metadata) {
+        Janus.log(`janus >>> Remote track event, mid=${mid}, ${metadata['reason']}`);
+        let reason = metadata['reason'];
+        if (reason === 'created') {
+          remoteStream.addTrack(track);
+        } else if (reason === 'ended') {
+          remoteStream.removeTrack(track);
+        }
+      },
+      detached: function() {
+        Janus.log("janus >>> Plugin detached");
       }
     }
-    // send join request
-    console.log(`joinButton >>> Joining room ${roomId}...`);
-    const res = await socket.emitWithAck('join', { room: roomId });
-    if (!res || res.code !== 200) {
-      throw new Error(`Bad response for join: ${JSON.stringify(res)}`);
-    }
-    console.log(`joinButton >>> joined room ${roomId}, response=${JSON.stringify(res)}`);
-    // toggle button state
-    leaveButton.disabled = false;
-  } catch (err) {
-    console.error(`joinButton >>> join() error: ${err}`);
-    // reset buttons
-    joinButton.disabled = false;
-    leaveButton.disabled = true;
-  }
+  );
 }
 
 async function leave() {
-  console.log('leaveButton >>> user clicked on leave');
-  await doLeave('leaveButton');
-}
+  Janus.log("joinButton >>> User clicked on leave");
 
-async function onJoinNotify(msg) {
-  console.log(`socket >>> Received join notify from server: ${JSON.stringify(msg)}`);
-  // state check
-  if (!joinButton.disabled) {
-    console.log('socket >>> we are not in join state, ignore join_notify');
-    return;
-  }
-  // initiate WebRTC call
-  try {
-    // create offer
-    console.log(`socket >>> caller: create offer, options=${JSON.stringify(offerOptions)}`);
-    const offer = await pc.createOffer(offerOptions);
-    console.log(`socket >>> caller: offer created: ${JSON.stringify(offer)}`);
-    // set local SDP
-    console.log('socket >>> caller: set local SDP');
-    await pc.setLocalDescription(offer);
-    // send offer
-    console.log('socket >>> caller: sending offer to peer...');
-    socket.emit('message', { room: roomId, data: offer });
-  } catch (err) {
-    console.error(`socket >>> onJoinNotify() error: ${err}`);
-  }
-}
-
-async function onLeaveNotify(msg) {
-  console.log(`socket >>> Received leave notify from server: ${JSON.stringify(msg)}`);
-  // state check
-  if (!joinButton.disabled) {
-    console.log('socket >>> we are not in join state, ignore leave_notify');
-    return;
-  }
-  // do leave
-  await doLeave('socket');
-}
-
-async function onMessage(msg) {
-  console.log(`socket >>> Received message from server: ${JSON.stringify(msg)}`);
-  // state check
-  if (!joinButton.disabled) {
-    console.log('socket >>> we are not in join state, ignore message');
-    return;
-  }
-  // process message
-  try {
-    // sanity check
-    if (!msg || !msg.room || !msg.data) {
-      throw new Error('invalid message');
-    }
-    const data = msg.data;
-    if (data.type === 'offer') {
-      // callee
-      console.log('socket >>> callee: received offer from peer, set remote SDP');
-      await pc.setRemoteDescription(new RTCSessionDescription(data));
-      console.log('socket >>> callee: create answer, options={}');
-      const answer = await pc.createAnswer();
-      console.log(`socket >>> callee: answer created: ${JSON.stringify(answer)}`);
-      console.log('socket >>> callee: set local SDP');
-      await pc.setLocalDescription(answer);
-      console.log('socket >>> callee: sending answer to peer...');
-      socket.emit('message', { room: roomId, data: answer });
-    } else if (data.type === 'answer') {
-      // caller
-      console.log('socket >>> caller: received answer from peer, set remote SDP');
-      await pc.setRemoteDescription(new RTCSessionDescription(data));
-    } else if (data.type === 'candidate') {
-      // both
-      console.log('socket >>> both: received ICE candidate from peer, add ICE candidate');
-      await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-    }
-  } catch (err) {
-    console.error(`socket >>> onMessage() error: ${err}`);
-  }
-}
-
-async function doLeave(pattern) {
   leaveButton.disabled = true;
-  try {
-    // stop remote video
-    remoteVideo.srcObject = null;
-    // destroy PeerConnection
-    pc.close();
-    pc = null;
-    // send leave request
-    const res = await socket.emitWithAck('leave', { room: roomId });
-    console.log(`${pattern} >>> left room ${roomId}, response=${JSON.stringify(res)}`);
-  } catch (err) {
-    console.error(`${pattern} >>> doLeave() error: ${err}`);
-  }
+
+  echotest.detach();
+
   joinButton.disabled = false;
 }
 
-function onConnectionStateChange() {
-  console.log(`pc >>> Conneciton state changed: ${pc.connectionState}`);
-  if (pc.connectionState === 'connected') {
-    const transceivers = pc.getTransceivers();
-    const iceDumper = function(xfer) {
-      const track = xfer.track;
-      const iceTransport = xfer.transport.iceTransport;
-      const pair = iceTransport.getSelectedCandidatePair();
-      const localType = `${pair.local.type}`;
-      const localCandidate = `${pair.local.address}:${pair.local.port}`;
-      const remoteType = `${pair.remote.type}`;
-      const remoteCandidate = `${pair.remote.address}:${pair.remote.port}`;
-      console.log(`pc >>> ICE pair for track '${track.label}' {${track.id}}: <${localType}>${localCandidate} <=> <${remoteType}>${remoteCandidate}`);
-    };
-    transceivers.forEach((x) => {
-      if (x.sender) {
-        iceDumper(x.sender);
-      }
-      if (x.receiver) {
-        iceDumper(x.receiver);
-      }
-    });
-  }
-}
-
-function onIceCandidate(evt) {
-  console.log(`pc >>> ICE candidate: ${JSON.stringify(evt.candidate)}`);
-  if (evt.candidate !== null) {
-    console.log('pc >>> sending ICE candidate to peer...');
-    socket.emit('message', {
-      room: roomId,
-      data: {
-        type: 'candidate',
-        candidate: evt.candidate
-      }
-    });
-  }
-}
-
-function onTrack(evt) {
-  console.log(`pc >>> Got remote track '${evt.track.label}' {${evt.track.id}}`);
-  if (remoteStream !== evt.streams[0]) {
-    remoteStream = evt.streams[0];
-    remoteVideo.srcObject = remoteStream;
-  }
-}
-
-// ready to play
-startButton.disabled = false;
-
-// XXX TODO:
-// handle media timeout & socket disconnect
+// Get ready
+$(document).ready(function() {
+  // Initialize the library (all console debuggers enabled)
+  Janus.init({
+    debug: "all",
+    callback: function() {
+      // ready to play
+      Janus.log(`document >>> ready to play, echotestOpaqueId=${echotestOpaqueId}`);
+      startButton.disabled = false;
+    },
+    dependencies: Janus.useDefaultDependencies()
+  });
+});

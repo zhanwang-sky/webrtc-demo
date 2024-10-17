@@ -1,17 +1,22 @@
 'use strict';
 
+// meeting params
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 const passive = urlParams.get('passive');
 
 // getUserMedia
 const mediaConstraints = {
-  audio: false,
+  audio: {
+    channelCount: 2,
+    sampleRate: 48000,
+    sampleSize: 16
+  },
   video: {
-    width: 640,
-    height: 480,
+    facingMode: 'user',
     frameRate: 15,
-    // facingMode: 'back',
+    height: 360,
+    width: 640
   }
 };
 
@@ -21,18 +26,26 @@ const turnPass = urlParams.has('turnp') ? urlParams.get('turnp') : '';
 let pcConfig = {};
 
 if (turnUser && turnPass) {
-  const turnUrls = [`turn:${window.location.hostname}:3478`];
+  const turnUrls = [`turns:${window.location.hostname}:5349`];
   pcConfig = {
     iceServers: [ { urls: turnUrls, username: turnUser, credential: turnPass } ],
     iceTransportPolicy: 'all'
   };
 };
 
-// Offer
-const offerOptions = {
-  offerToReceiveAudio: 0,
-  offerToReceiveVideo: 1
-};
+// setCodecPreferences
+const preferredCodecs = {
+  audio: RTCRtpReceiver.getCapabilities('audio').codecs.filter(codec =>
+    codec.mimeType === 'audio/opus' || codec.mimeType === 'audio/red'
+  ),
+  video: RTCRtpReceiver.getCapabilities('video').codecs.filter(codec =>
+    codec.mimeType === 'video/H264' ||
+    codec.mimeType === 'video/red' ||
+    codec.mimeType === 'video/rtx' ||
+    codec.mimeType === 'video/ulpfec' ||
+    codec.mimeType === 'video/flexfec-03'
+  )
+}
 
 // buttons
 const startButton = document.getElementById('startButton');
@@ -47,46 +60,53 @@ startButton.addEventListener('click', start);
 joinButton.addEventListener('click', join);
 leaveButton.addEventListener('click', leave);
 
-// videos
+// media objects
 const localVideo = document.getElementById('localVideo');
 const remoteVideo = document.getElementById('remoteVideo');
 
-localVideo.addEventListener('loadedmetadata', function() {
-  console.log(`localVideo >>> size: ${this.videoWidth}*${this.videoHeight}`);
+localVideo.addEventListener('resize', () => {
+  console.log(`localVideo >>> size changed to ${localVideo.videoWidth}*${localVideo.videoHeight}`);
 });
 
-remoteVideo.addEventListener('loadedmetadata', function() {
-  console.log(`remoteVideo >>> size: ${this.videoWidth}*${this.videoHeight}`);
+remoteVideo.addEventListener('resize', () => {
+  console.log(`remoteVideo >>> size changed to ${remoteVideo.videoWidth}*${remoteVideo.videoHeight}`);
 });
 
-remoteVideo.addEventListener('resize', function() {
-  console.log(`remoteVideo >>> size changed to ${this.videoWidth}*${this.videoHeight}`);
-});
-
-// event callbacks
+// global variables
 let socket;
 let localStream;
 let remoteStream;
 let pc;
 
+// event callbacks
 async function start() {
   console.log('startButton >>> user clicked on start');
   startButton.disabled = true;
   try {
     // prepare local stream
     if (!localStream && passive !== 'true') {
-      console.log(`startButton >>> Requesting local stream, constraints=${JSON.stringify(mediaConstraints)}`);
+      console.log(`startButton >>> Requesting local stream, constraints:\n${JSON.stringify(mediaConstraints, null, 2)}`);
       localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      console.log('startButton >>> Received local stream');
+      const streamInfo = { msid: localStream.id, tracks: [] };
+      localStream.getTracks().forEach(track => {
+        streamInfo.tracks.push({
+          id: track.id,
+          kind: track.kind,
+          label: track.label
+        });
+      });
+      console.log(`startButton >>> Received local stream:\n${JSON.stringify(streamInfo, null, 2)}`);
       localVideo.srcObject = localStream;
     }
     // connect to the socket.io server
     console.log('startButton >>> Connecting to socket.io server...');
-    socket = io.connect();
-    console.log('startButton >>> Connected to socket.io server');
-    socket.addEventListener('join_notify', onJoinNotify);
-    socket.addEventListener('leave_notify', onLeaveNotify);
-    socket.addEventListener('message', onMessage);
+    socket = io();
+    socket.on('connect', () => {
+      console.log(`socket >>> Connected to socket.io server, id=${socket.id}`);
+    });
+    socket.on('join_notify', onJoinNotify);
+    socket.on('leave_notify', onLeaveNotify);
+    socket.on('message', onMessage);
     // toggle button state
     joinButton.disabled = false;
   } catch (err) {
@@ -103,30 +123,38 @@ async function join() {
   try {
     // create PeerConnection
     if (!pc) {
-      console.log(`joinButton >>> Creating PeerConnection, configuration=${JSON.stringify(pcConfig)}`);
+      console.log(`joinButton >>> Create PeerConnection, configuration:\n${JSON.stringify(pcConfig, null, 2)}`);
       pc = new RTCPeerConnection(pcConfig);
+      pc.onconnectionstatechange = () => {
+        console.log(`pc >>> Connection state changed to ${pc.connectionState}`);
+      };
       pc.onicecandidateerror = (evt) => {
-        console.log(`pc >>> ICE candidate error: The server ${evt.url} returned an error with code ${evt.errorCode}: ${evt.errorText}`);
+        console.log(`pc >>> ICE candidate error:\n${JSON.stringify(evt, null, 2)}`);
       };
       pc.oniceconnectionstatechange = () => {
-        console.log(`pc >>> ICE connection state changed: ${pc.iceConnectionState}`);
+        console.log(`pc >>> ICE connection state changed to ${pc.iceConnectionState}`);
       };
       pc.onicegatheringstatechange = () => {
-        console.log(`pc >>> ICE gathering state changed: ${pc.iceGatheringState}`);
+        console.log(`pc >>> ICE gathering state changed to ${pc.iceGatheringState}`);
+      };
+      pc.onnegotiationneeded = () => {
+        console.log('pc >>> Negotiation needed');
       };
       pc.onsignalingstatechange = () => {
-        console.log(`pc >>> Signaling state changed: ${pc.signalingState}`);
+        console.log(`pc >>> Signaling state changed to ${pc.signalingState}`);
       };
-      pc.addEventListener('connectionstatechange', onConnectionStateChange);
       pc.addEventListener('icecandidate', onIceCandidate);
       pc.addEventListener('track', onTrack);
       // Add local tracks
-      if (passive !== 'true') {
-        localStream.getTracks().forEach((track) => {
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
           pc.addTrack(track, localStream);
-          console.log(`joinButton >>> Added local track to pc: '${track.label}' {${track.id}}`);
         });
       }
+      // Set codec preferences
+      pc.getTransceivers().forEach(transceiver => {
+        transceiver.setCodecPreferences(preferredCodecs[transceiver.sender.track.kind]);
+      });
     }
     // send join request
     console.log(`joinButton >>> Joining room ${roomId}...`);
@@ -134,7 +162,7 @@ async function join() {
     if (!res || res.code !== 200) {
       throw new Error(`Bad response for join: ${JSON.stringify(res)}`);
     }
-    console.log(`joinButton >>> joined room ${roomId}, response=${JSON.stringify(res)}`);
+    console.log(`joinButton >>> joined room ${roomId}, response: ${JSON.stringify(res)}`);
     // toggle button state
     leaveButton.disabled = false;
   } catch (err) {
@@ -147,7 +175,7 @@ async function join() {
 
 async function leave() {
   console.log('leaveButton >>> user clicked on leave');
-  await doLeave('leaveButton');
+  doLeave('leaveButton');
 }
 
 async function onJoinNotify(msg) {
@@ -160,14 +188,14 @@ async function onJoinNotify(msg) {
   // initiate WebRTC call
   try {
     // create offer
-    console.log(`socket >>> caller: create offer, options=${JSON.stringify(offerOptions)}`);
-    const offer = await pc.createOffer(offerOptions);
-    console.log(`socket >>> caller: offer created: ${JSON.stringify(offer)}`);
+    console.log('socket >>> Creating offer...');
+    const offer = await pc.createOffer();
+    console.log(`socket >>> Offer created:\n${JSON.stringify(offer, null, 2)}`);
     // set local SDP
-    console.log('socket >>> caller: set local SDP');
+    console.log('socket >>> Setting local SDP...');
     await pc.setLocalDescription(offer);
     // send offer
-    console.log('socket >>> caller: sending offer to peer...');
+    console.log('socket >>> Send offer to peer');
     socket.emit('message', { room: roomId, data: offer });
   } catch (err) {
     console.error(`socket >>> onJoinNotify() error: ${err}`);
@@ -182,11 +210,11 @@ async function onLeaveNotify(msg) {
     return;
   }
   // do leave
-  await doLeave('socket');
+  doLeave('socket');
 }
 
 async function onMessage(msg) {
-  console.log(`socket >>> Received message from server: ${JSON.stringify(msg)}`);
+  console.log(`socket >>> Received message from server:\n${JSON.stringify(msg, null, 2)}`);
   // state check
   if (!joinButton.disabled) {
     console.log('socket >>> we are not in join state, ignore message');
@@ -201,22 +229,22 @@ async function onMessage(msg) {
     const data = msg.data;
     if (data.type === 'offer') {
       // callee
-      console.log('socket >>> callee: received offer from peer, set remote SDP');
+      console.log('socket >>> Received offer from peer, setting remote SDP...');
       await pc.setRemoteDescription(new RTCSessionDescription(data));
-      console.log('socket >>> callee: create answer, options={}');
+      console.log('socket >>> Creating answer...');
       const answer = await pc.createAnswer();
-      console.log(`socket >>> callee: answer created: ${JSON.stringify(answer)}`);
-      console.log('socket >>> callee: set local SDP');
+      console.log(`socket >>> Answer created:\n${JSON.stringify(answer, null, 2)}`);
+      console.log('socket >>> Setting local SDP...');
       await pc.setLocalDescription(answer);
-      console.log('socket >>> callee: sending answer to peer...');
+      console.log('socket >>> Send answer to peer');
       socket.emit('message', { room: roomId, data: answer });
     } else if (data.type === 'answer') {
       // caller
-      console.log('socket >>> caller: received answer from peer, set remote SDP');
+      console.log('socket >>> Received answer from peer, setting remote SDP...');
       await pc.setRemoteDescription(new RTCSessionDescription(data));
     } else if (data.type === 'candidate') {
       // both
-      console.log('socket >>> both: received ICE candidate from peer, add ICE candidate');
+      console.log('socket >>> Received ICE candidate from peer, adding ICE candidate...');
       await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
     }
   } catch (err) {
@@ -233,43 +261,19 @@ async function doLeave(pattern) {
     pc.close();
     pc = null;
     // send leave request
+    console.log(`${pattern} >>> leaving room ${roomId}...`);
     const res = await socket.emitWithAck('leave', { room: roomId });
-    console.log(`${pattern} >>> left room ${roomId}, response=${JSON.stringify(res)}`);
+    console.log(`${pattern} >>> left room ${roomId}, response: ${JSON.stringify(res)}`);
   } catch (err) {
     console.error(`${pattern} >>> doLeave() error: ${err}`);
   }
   joinButton.disabled = false;
 }
 
-function onConnectionStateChange() {
-  console.log(`pc >>> Conneciton state changed: ${pc.connectionState}`);
-  if (pc.connectionState === 'connected') {
-    const transceivers = pc.getTransceivers();
-    const iceDumper = function(xfer) {
-      const track = xfer.track;
-      const iceTransport = xfer.transport.iceTransport;
-      const pair = iceTransport.getSelectedCandidatePair();
-      const localType = `${pair.local.type}`;
-      const localCandidate = `${pair.local.address}:${pair.local.port}`;
-      const remoteType = `${pair.remote.type}`;
-      const remoteCandidate = `${pair.remote.address}:${pair.remote.port}`;
-      console.log(`pc >>> ICE pair for track '${track.label}' {${track.id}}: <${localType}>${localCandidate} <=> <${remoteType}>${remoteCandidate}`);
-    };
-    transceivers.forEach((x) => {
-      if (x.sender) {
-        iceDumper(x.sender);
-      }
-      if (x.receiver) {
-        iceDumper(x.receiver);
-      }
-    });
-  }
-}
-
 function onIceCandidate(evt) {
-  console.log(`pc >>> ICE candidate: ${JSON.stringify(evt.candidate)}`);
   if (evt.candidate !== null) {
-    console.log('pc >>> sending ICE candidate to peer...');
+    console.log(`pc >>> ICE candidate:\n${JSON.stringify(evt.candidate, null, 2)}`);
+    console.log('pc >>> Send ICE candidate to peer');
     socket.emit('message', {
       room: roomId,
       data: {
@@ -277,19 +281,29 @@ function onIceCandidate(evt) {
         candidate: evt.candidate
       }
     });
+  } else {
+    console.log('pc >>> ICE candidate: done');
   }
 }
 
 function onTrack(evt) {
-  console.log(`pc >>> Got remote track '${evt.track.label}' {${evt.track.id}}`);
-  if (remoteStream !== evt.streams[0]) {
+  const trackInfo = {
+    id: evt.track.id,
+    kind: evt.track.kind,
+    belongsTo: evt.streams.map(stream => stream.id)
+  };
+  console.log(`pc >>> Got remote track:\n${JSON.stringify(trackInfo, null, 2)}`);
+  if (evt.streams.length && (remoteStream !== evt.streams[0])) {
     remoteStream = evt.streams[0];
     remoteVideo.srcObject = remoteStream;
   }
 }
 
+// check codecs
+if (!preferredCodecs['audio'].length || !preferredCodecs['video'].length) {
+  alert('missing codecs');
+  throw new Error('missing codecs');
+}
+
 // ready to play
 startButton.disabled = false;
-
-// XXX TODO:
-// handle media timeout & socket disconnect
